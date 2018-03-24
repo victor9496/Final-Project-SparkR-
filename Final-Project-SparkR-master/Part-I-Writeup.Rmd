@@ -1,0 +1,377 @@
+---
+title: "Part1 Analysis"
+author: "Team: SparkR"
+date: "2017/12/7"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, warning=FALSE, message=FALSE)
+suppressMessages(library(ggplot2))
+suppressMessages(library(dplyr))
+suppressMessages(library(reshape2))
+suppressMessages(library(tidyr))
+suppressMessages(library(gridExtra))
+suppressMessages(library(grid))
+suppressMessages(library(knitr))
+```
+
+1. Introduction: Summary of problem and objectives (5 points)
+
+Late 18th century Paris has witnessed countless number of auctions on fine arts and paintings from countries across Europe. Our project utilizes this dataset from auction in 18th century Paris with details of paintings, authors and auctions. 
+We hope to build a OLS model to predict the log of price fetched at auction. Since our dataset contains 59 variables, we would want to perform variable selection to build a parsimonious model with good performance in critiria such as RMSE, etc. 
+In addition to that, some variables have a lot of missing values and typos. We would need to perform some sort of missing imputation, e.g. assume MCAR and use MICE package. For typos, we would recode them to appropriate values.
+From the correlation martices, we find some highly-correlated variables, so we decide to not include some of the variables in our model to aviod multicollinearity.
+
+2. Exploratory data analysis (10 points): must include three correctly labeled graphs and an explanation that highlight the most important features that went into your model building.
+
+
+```{r echo=FALSE, warning=FALSE}
+###Function to clean the dataset
+
+#load the training data set
+load("paintings_train.Rdata")
+
+
+clean = function(df, NA.omit=F){
+   df = df %>% 
+     select(-c(sale, price, count, subject, winningbidder, winningbiddertype, authorstandard, authorstyle, author, Height_in, Width_in, Surface_Rect, Diam_in, Surface_Rnd,material,materialCat)) %>%
+     mutate(lot = as.numeric(lot)) %>%
+     mutate(mat_recode = ifelse(mat %in% c("a", "bc", "c"), "metal",
+                          ifelse(mat %in% c("al", "ar", "m"), "stone",
+                                ifelse(mat %in% c("co", "bt", "t"), "canvas",
+                                       ifelse(mat %in% c("p", "ca"), "paper",
+                                              ifelse(mat %in% c("b"), "wood",
+                                                     ifelse(mat %in% c("o", "e", "v"), "other",
+                                                            ifelse(mat %in% c("n/a", ""), "na",
+                                                                   "na")))))))) %>%
+     mutate(school_pntg_recode = ifelse(school_pntg %in% c("A", "G", "S"), "other",school_pntg)) %>%
+     mutate(SurfaceNA = ifelse(is.na(df$Surface), 1, 0))%>%
+     mutate(IntermNA = ifelse(is.na(df$Interm), 1, 0)) %>%
+     mutate(nfigures=as.numeric(nfigures))%>%
+     mutate(Surface=log(Surface+1))%>%
+     select(-c(mat,school_pntg))
+   
+   factornames=colnames(df)[!colnames(df) %in% c("logprice","lot","position","Surface","nfigures")]
+   
+   df[factornames] = lapply(df[factornames], factor)
+
+   df$Surface[is.na(df$Surface)] = 0
+  
+  
+   if(NA.omit==T){
+      df = na.omit(df)
+   }
+
+
+   df=df[vapply(df, function(x) length(unique(x)) > 1, logical(1L))]
+   
+  return(df) 
+}
+
+
+train = clean(paintings_train, NA.omit = T)
+```
+
+
+
+For this part, we intially have found some interaction between predictors from graph perspective; however, in our further model selection process and trials and error.
+
+First, we choose to plot boxplots for the variables that are highly correlated with response `logprice`
+
+```{r echo=FALSE, warning=FALSE}
+train_sub1 = train %>% select(logprice, dealer, endbuyer, type_intermed, lrgfont)
+
+
+df1 = train %>% 
+  select(logprice, dealer) 
+
+df2 = train %>% 
+  select(logprice, endbuyer)
+
+df3 = train %>% 
+  select(logprice, type_intermed)
+
+df4 = train %>% 
+  select(logprice, lrgfont) 
+
+# df1.final = rbind(df1,df2,df3, df4)
+# 
+# ggplot(train, aes(x=type, y= logprice)) +
+#   facet_wrap(~type) +
+#   geom_boxplot()
+```
+
+```{r echo=FALSE, warning=FALSE}
+g1 = ggplot(df1, aes(x=dealer, y= logprice)) +
+  geom_boxplot(color="#999999",  alpha=0.8)
+g2 = ggplot(df2, aes(x=endbuyer, y= logprice)) +
+  geom_boxplot(color="#E69F00",  alpha=0.8)
+g3 = ggplot(df3, aes(x=type_intermed, y= logprice)) +
+  geom_boxplot(color="#56B4E9",  alpha=0.8)
+g4 = ggplot(df4, aes(x=lrgfont, y= logprice)) +
+  geom_boxplot(color="purple",  alpha=0.8)
+
+grid.arrange(g1, g2,g3,g4, ncol=2, top=textGrob("Boxplot for 4 most 'significant' variables", gp=gpar(fontsize=12,font=8)))
+```
+
+
+As we can see, for these four factor variables, each level has differernt means and distributions across, for examle, doing business with dealer R may not be a good deal, since they tend to have higher price, but it could also be the case that they tend to sell higher value painting; also, collectors tend bid higher price compared with other end buyers; from type of inttype of intermediary perspective, experts tend to have higher price in mind,(becasue they know the true intrinsic value?), lastly, if dealer have more information about the paintings, the final price will be higher as well. Therefore, it is likely human factors(especially type of dealer) play an important role on deciding the final bidding price, and we will expect they will "survive" after model selection process.
+
+
+Second, we try to find  some interaction effect between predictors using tree models.
+
+```{r echo=FALSE, warning=FALSE}
+# library(tree)
+# tree.vote =tree(logprice ~ ., data= train)
+# summary(tree.vote)
+# plot(tree.vote)
+# text(tree.vote, cex=.75)
+# 
+# #Pruning
+# set.seed(2)
+# cv.vote = cv.tree(tree.vote, FUN=prune.tree)
+# plot(cv.vote$size,cv.vote$dev, type="b")
+# prune.vote = prune.tree(tree.vote ,best =11)
+# plot(prune.vote)
+# text(prune.vote, cex=.75)
+suppressMessages(library(RColorBrewer))
+
+
+df5 = paintings_train %>% 
+  select(price, year, school_pntg) %>% 
+  mutate(year = as.character(year)) %>% 
+  mutate(year = as.numeric(year)) %>%
+  mutate(price = as.numeric(price)) %>% 
+  filter(!is.na(price)) %>% 
+  group_by(year, school_pntg) %>% 
+  summarize(average = sum(price)/n())%>% 
+  group_by(school_pntg)
+
+
+ggplot(data = df5, aes(x = year, y= average, col = school_pntg)) +
+  geom_line(size = 1.5) +
+  scale_color_brewer(type = 'div', palette = 'Spectral')+
+  xlab("Year of sale")+
+  ylab("Average price")+
+  ggtitle("Average price of differnt school of paintings on each year") +
+  labs(col = "School of Paintings") +
+  theme_bw()
+
+```
+
+Since when plotting average logprice, all the line lie between each other, we decide to plot price in original scale instead. As you can see from the plot, Dutch/Flemish and French school of paintings tend to have a higher average price in the year between 1765 and 1778, with the maximum across the group, Dutch/Flemish has the average price over 600 dollars for the paintings in the year around 1770(possibly becasue of the decease of some well-known artists);Even though Italian has lowever in the earlier year, they do have higher price in post-1777 era. With all these observations, it suggests there will be "some" interaction effect between  `school_pntg` and `year` that affect the overall price of paintings.
+
+Third, we dive into predictors transformation:
+
+```{r echo=FALSE}
+
+
+#copy the training data
+
+plot_surface=paintings_train%>%
+
+  filter(!is.na(Surface))%>%
+
+  select(logprice,Surface)
+
+
+
+#before filtering
+
+plot_wo_filter = ggplot(data = plot_surface, aes(x = Surface, y = logprice)) + 
+
+geom_point(alpha= 0.3, size = 0.8) + 
+  labs(x = expression(paste("Surface", " (", inches^2, ")")), y = "log(price)",
+
+       title = "log(price) vs. Surface (before filtering)") +theme(plot.title = element_text(hjust = 0.5))
+
+
+
+#filter for outliers and zeroes
+
+plot_surface=plot_surface%>%
+
+  filter(!is.na(Surface))%>%
+
+  filter(Surface<8000)%>%
+
+  filter(Surface>0)
+
+
+
+#after filtering
+
+plot_w_filter = ggplot(data = plot_surface, aes(x = Surface, y = logprice)) + 
+
+geom_point(alpha= 0.3, size = 0.8) + 
+
+  labs(x = expression(paste("Surface", " (", inches^2, ")")), y = "log(price)",
+
+       title = "log(price) vs. Surface (after filtering)") +theme(plot.title = element_text(hjust = 0.5))
+
+
+
+#sqrt transformation
+
+plot_sqrt_trans=ggplot(data = plot_surface, aes(x = sqrt(Surface), y = logprice)) + 
+
+geom_point(alpha= 0.3, size = 0.8) + 
+  labs(x = expression(paste(sqrt(Surface), " (", inches^2, ")")), y = "log(price)",
+
+       title = "log(price) vs. sqrt(Surface) ") +theme(plot.title = element_text(hjust = 0.5))
+
+
+
+#log transformation
+
+plot_log_trans=ggplot(data = plot_surface, aes(x = log(Surface), y = logprice)) + 
+
+geom_point(alpha= 0.3, size = 0.8) + 
+  labs(x = expression(paste("log(Surface)", " (", inches^2, ")")), y = "log(price)",
+
+       title = "log(price) vs. log(Surface) ")+theme(plot.title = element_text(hjust = 0.5))
+
+
+
+#plotting
+
+grid.arrange(plot_wo_filter,plot_w_filter,plot_sqrt_trans,plot_log_trans,ncol=2)
+
+```
+
+
+At a first galance, we do not observe any significant linear relationship between the response: "log(price)" and the predictor: "Surface". After we remove some outliers and zeroes(0 surface is not meaningful), we do not achieve much improvement. Therefore, we decide to use transformations on "Surface". First, we take the squre root on "Surface". As we can see, the points are less concentrated and more normally distributed after the tansformation. When using log transformation, we have the distribution of log(Surface) very close to normal distribution. Under log transformation, we still cannot see any obvious linear relationship between the response and the predictor. However, when we perform variable selection under Bayesian information criterion, we would have "Surface", log transformed, included in the final model with a positive coefficient and a relatively small p-value. By intuition, the inclusion of Surface in the model makes sense because paintings with larger surface would probably correpond to more amount of work and more painting materials used and therefore higher prices.
+
+3. Development and assessment of an initial model (10 points)
+
+* Initial model: must include a summary table and an explanation/discussion for variable selection and overall amount of variation explained. 
+
+* Model selection: must include a discussion
+
+* Residual: must include residual plot(s) and a discussion.  
+
+* Variables: must include table of coefficients and CI
+
+```{r echo=FALSE, warning=FALSE}
+model1 = lm(logprice ~ 1+., data = train)
+
+model1 = step(model1, k=log(nrow(train)), trace = 0)
+results.bic=summary(model1)
+#results.bic$coefficients
+
+
+# #library(mice)
+# imputed_Data <- mice(train, m=5, maxit = 50, method = 'pmm', seed = 500)
+# train[is.na(train$Surface),'Surface'] = imputed_Data$imp$Surface_Rect[2]
+# imputed_Data <- mice(test, m=5, maxit = 50, method = 'pmm', seed = 500)
+# test[is.na(test$Surface),'Surface'] = imputed_Data$imp$Surface_Rect[2]
+
+# library(glmnet)
+# 
+# f <- as.formula(logprice ~ .+year*lrgfont
+#                 +year*origin_author
+#                 +origin_author*type_intermed
+#                 +type_intermed*position
+#                 +origin_author*Width_in
+#                 +Width_in*Surface_Rect
+#                 +year*Surface_Rect)
+# y <- new.df$logprice
+# x <- model.matrix(f, new.df)[, -1]
+# 
+# grid = 10^(seq(10,-2, length=100))
+# 
+# library(glmnet)
+# lasso.mod= glmnet(x,y,alpha=1, lambda=grid)
+# plot(lasso.mod)
+# set.seed(1)
+# 
+# cv.out = cv.glmnet(x,y, alpha=1)
+# plot(cv.out)
+# bestlam=cv.out$lambda.min
+# lasso.mod2 = glmnet(x,y,alpha=1, lambda=bestlam)
+# 
+# #out=glmnet(x,y,alpha=1, lambda=grid)
+# lasso.coef=predict(lasso.mod2, type="coefficients", s=bestlam)
+# lasso.coef
+# 
+# index = which(summary(lasso.coef)[,3] > 0.01 | summary(lasso.coef)[,3] < -0.01 )
+# 
+# variables = row.names(lasso.coef)[index]
+
+train=clean(paintings_train, NA.omit = F)
+model1 = lm(logprice~Surface + dealer + endbuyer + diff_origin + type_intermed + engraved + mat_recode+school_pntg_recode+paired + lrgfont + lands_sc + othgenre + discauth + othartist+still_life,
+    data = train)
+```
+
+```{r echo=FALSE}
+summary(model1)
+```
+
+From the summary of our model, we can see the  R-squared is 0.5899, which suggests 58.99% of variability has been explained by our predictors. From our EDA, we can see dealer, type of end buyer(endbuyer),  type of intermediary(type_intermed) and whether the dealer devotes an additional paragraph(lrgfont). Those variables appear to be important in the boxplots so we would include them in our model. Starting with the full model, we perform stepwise selection based on BIC along with LASSO(not included in the output); even though we are aware that models coming from the AIC selection tend to have higher prediction power, it is not the case here after "backward", "forward" nor "both", so we decide to combine some predictors from AIC with the BIC model, after some trial and errors, notably deleting one of the "important" variable year(either numeric or factor type), it dramatically increase the model performance in the test model, the reason behind could be there are some hidden correlation between year and other preditors in the model. Moreover, it is surprising that we can't find any meaningful interaction in this case, like the one we mentioned above in task two, along with dealer:dif_orgin and dealer:origin_cat, none of them survive from our stepwise selection, and manually adding them will not increase model performance either, therefore, we decide not to include interaction term in this part of the model.
+
+```{r echo=FALSE, fig3, fig.width=12, fig.height=8}
+#residual plots
+par(mfrow = c(2,2))
+plot(model1, c(1:3,5))
+```
+
+The Residual vs Fitted plot shows consistent residuals across different fitted values, which means constant variance assumption is satisfied. In addition to that, the Normal Q-Q plot displays essentially normal distributed residuals with a couple exception for the heavier right tail. And from Cook's distance plot, we can see all observations have small Cook's distance and there is no sign of influential points. There are is a high leverage point but since the standardized residual is very small, it's not an influential point. We suspect observation #180, #1080, #380 are potential outliers (could be masking?), but since their leverage are very low, it would not affect the model much. Hence, we decide that all assumptions for this model have been met and we will use this model for prediction. Further analysis could improve by involving addtional predictors and interaction or even using gernal addictive model to explain thoes observation.
+
+The coefficients and confidence interval of variables used are as follows:
+
+```{r echo=FALSE}
+#coefficients and CI
+CI = cbind(model1$coefficients,confint(model1))
+colnames(CI) = c("coefficient","2.5%","97.5%")
+kable(CI)
+```
+
+```{r predict-model1, echo=FALSE}
+load("paintings_test.Rdata")
+test =clean(paintings_test, NA.omit = F)
+# 
+predictions = as.data.frame(
+  exp(predict(model1, newdata=test,
+              interval = "pred")))
+# save(predictions, file="predict-test.Rdata")
+```
+
+We can see some of the variables are not statiscially significant or their confidence intervals involve 0, however, we can not draw a conclusion that should include thoes variables in the model since the p-vaule after stepwise selection like in this case, is no longer meaningful.
+
+
+4. Summary and Conclusions (10 points)
+
+What is the (median) price for the "baseline" category if there are categorical or dummy variables in the model (add CI's)?  (be sure to include units!) Highlight important findings and potential limitations of your model.  Does it appear that interactions are important?  What are the most important variables and/or interactions?  Provide interprations of how the most important variables influence the (median) price giving a range (CI).  Correct interpretation of coefficients for the log model desirable for full points.
+
+Provide recommendations for the art historian about features or combination of features to look for to find the most valuable paintings.
+
+The "baseline" category is auctioned by dealer J, with no information about end buyer nor the type of intermidary. The matrial of painting is canvas, school of painting is Dutch/Flemish, sold not in pairs, and dealer did not devote large paragraph nor engaged with the authenticity of the painting. The painting is not about land scape and did not contain still life elements. And the painting is not linked with the work of another artists or style and its description did not mention a genre scene.
+
+The median price for the "baseline" category is:
+
+```{r echo=FALSE}
+#exp(mean(train$Surface)*0.21815+2.27680)
+# df.base = data.frame(data.frame(Surface = mean(train$Surface), dealer = 0,endbuyer =0, diff_origin = 0,type_intermed = 0,engraved = 0,mat_recode = 0,mat_recode = 0,school_pntg_recode = 0,paired = 0,lrgfont = 0,lands_sc = 0,othgenre = 0,discauth = 0,othartist = 0,still_life = 0))
+# colnames(df.base) = 
+
+df.base = train %>% select(Surface, dealer, endbuyer, diff_origin, type_intermed, engraved,
+                           mat_recode, school_pntg_recode, paired, lrgfont, lands_sc,
+                           othgenre, discauth,othartist,still_life )
+df.base[1132,] = c(mean(test$Surface), "J", "", 0,"", 0, "canvas", "D/FL", 0,0,0,0,0,0,0)
+df.base$Surface = as.numeric(df.base$Surface)
+
+exp(predict(model1, newdata =df.base[1132,],  interval = "pred"))
+```
+With the fitted value will be the median price and its prediction interval, its unit will be livres. It means that with average surface area(about 587 inch^2) and it is  auctioned by dealer J, with no information about end buyer nor the type of intermidary. The matrial of painting is canvas, school of painting is Dutch/Flemish, sold not in pairs, and dealer did not devote large paragraph nor engaged with the authenticity of the painting. The painting is not about land scape and did not contain still life elements. And the painting is not linked with the work of another artists or style and its description did not mention a genre scene, its median price will be about 30.78 livres,and we are 95% confident that the price will be between 2.57 to 367.87 livres.
+
+```{r echo=FALSE}
+kable(CI[c(2,3:10,12:15,22:25),])
+```
+
+It's interesting that we find some interaction effects during EDA when we fitted some tree models, however, after fitting linear model, we decide to drop those interaction effects to improve model performance. This result suggets although those interactions might exist, they are not good predictors for logprice. Then, we can take a look at some important variables and their confidence intervals. 
+
+From the coefficients, we can see some predictos are very important to the logprice. In particular, if auctioned by dealer L, we would expect our price to increase by 144% compared with dealer J holding other variable constant, and we are 95% confident that the increase in price will be between 113% to 175%; if the end_buyer is collectors, we would expect the final price to increase by 93.5% compared with the buyer is ""(we should recode this part and make it more meaningful) holding other variable constant, and we are 95% confident that the increase in price will be between 62.6% to 125.5%; if auctioned by intermediary is expert, we would expect our price to increase by 53.8% compared withcompared with the intermediary is ""(we should recode this part and make it more meaningful) holding other variable constant, and we are 95% confident that the increase in price will be between 6% to 101.5%, which have a quite large uncertainty in this case; All other categorical variables would have similar interpretation. 
+For the only numerical variable surface, if we increase surface area by 1%, the price would increase 0.22% livres.
+
+My suggestion for art historian would be look for a painting with as large surface area as possible, and ideally auctioned by dealer L, bought by a dealer in the auction. And the origin of the painting should be correctly classified by the dealer. The painting should went through a dealer intermediary. In addition, if the dealer mentioned engraving done after the painting, it's likely to worth more. The material of the painting should be other to increase its value. Last, if a dealer devoted a large paragraph to the painting, it will worth more. If a art historian uses above critirion to select paintings, we believe they will find high value paintings in most cases.
